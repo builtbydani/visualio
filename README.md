@@ -1,5 +1,6 @@
 
 # 🎨 Audio Visualizer
+Try it out! https://builtbydani.github.io/visualio/
 
 A drop-in, **React + Canvas2D** visualizer with three animated modes:  
 - **EQ Bars** – spectrum analyzer  
