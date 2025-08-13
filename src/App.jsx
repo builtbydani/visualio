@@ -1,11 +1,51 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const FRACTAL_PRESETS = {
-  Dendrite: { cRe: -0.8,   cIm: 0.156,  scale: 1.8, panX: -0.10, panY: 0.00 },
-  Spiral:   { cRe: -0.4,   cIm: 0.6,    scale: 1.6, panX: 0.00,  panY: 0.00 },
-  Celtic:   { cRe: -0.390, cIm: -0.587, scale: 1.7, panX: 0.05,  panY: 0.00 },
-  Rabbit:   { cRe: -0.123, cIm: 0.745,  scale: 1.9, panX: 0.00,  panY: 0.00 },
+  Dendrite: 
+  { cRe: -0.8,
+    cIm: 0.156,
+    scale: 1.8,
+    panX: -0.10,
+    panY: 0.00,
+    interiorDim: 0.10,
+    driftX: 0.010,
+    driftY: 0.010 
+  },
+
+  Spiral:   
+  { cRe: -0.7,
+    cIm: 0.27015,
+    scale: 1.9,
+    panX: 0.00,
+    panY: 0.00,  
+    interiorDim: 0.07,
+    driftX: 0.012, 
+    driftY: 0.014,
+  },
+
+  Celtic:   
+  { cRe: 0.285,  
+    cIm: 0.01,   
+    scale: 2.0, 
+    panX: 0.00,
+    panY: 0.00,
+    interiorDim: 0.06,
+    driftX: 0.016,
+    driftY: 0.018,
+  },
+
+  Rabbit:
+  { cRe: -0.9,
+    cIm: 0.245,
+    scale: 1.7,
+    panX: 0.02,
+    panY: 0.02,
+    interiorDim: 0.08,
+    driftX: 0.018,
+    driftY: 0.020,
+  },  
 };
+
 /**
  * Audio Visualizer — Three Modes
  * - EQ Bars (spectrum)
@@ -15,7 +55,7 @@ const FRACTAL_PRESETS = {
  * Drop-in React component using Canvas2D + Web Audio API.
  * Tailwind for UI. No external libs.
  *
- * Usage: <AudioVisualizer /> in any React app (Vite recommended).2048
+ * Usage: <AudioVisualizer /> in any React app (Vite recommended)
  */
 export default function AudioVisualizer() {
   // UI State
@@ -31,7 +71,7 @@ export default function AudioVisualizer() {
   const [fractalStyle, setFractalStyle] = useState('dynamic');
   const [fractalPreset, setFractalPreset] = useState('Dendrite');
   const [fractalZoomSpeed, setFractalZoomSpeed] = useState(0.06);
-  const MAX_ZOOM = 35;
+  const MAX_ZOOM = 10;
 
   const canvasRef = useRef(null);
   const audioRef = useRef(null);
@@ -40,9 +80,14 @@ export default function AudioVisualizer() {
   const freqDataRef = useRef(null);
   const timeDataRef = useRef(null);
   const rafRef = useRef(0);
+  const frameRef = useRef(0);
+  const bloomRef = useRef(null);
   const offscreenRef = useRef(null); // for fractal low-res
   const fractalZoomRef = useRef(1);
   const fractalLastTRef = useRef(0);
+  const fractalQualityRef = useRef(0.75);
+  const fractalIterRef = useRef(96);
+  const fractalPerfRef = useRef({ lastResizeW: 0, lastResizeH: 0 });
 
   // Presets
   const PRESETS = useMemo(
@@ -149,6 +194,21 @@ export default function AudioVisualizer() {
       // Low-res buffer for fractal; scale later
       off.width = Math.max(160, Math.floor(canvas.clientWidth * renderScale * 0.5));
       off.height = Math.max(120, Math.floor(canvas.clientHeight * renderScale * 0.5));
+
+      if (!bloomRef.current) bloomRef.current = document.createElement("canvas");
+      const bloom = bloomRef.current;
+
+      bloom.width = Math.max(64, Math.floor(canvas.clientWidth * renderScale * 0.25));
+      bloom.height = Math.max(48, Math.floor(canvas.clientHeight * renderScale * 0.25));
+
+      if (bloomRef.current) {
+        const bloom = bloomRef.current;
+        const bw = Math.max(64, Math.floor(canvas.clientWidth * renderScale * 0.25));
+        const bh = Math.max(48, Math.floor(canvas.clientHeight * renderScale * 0.25));
+        if (bloom.width !== bw || bloom.height !== bh) {
+          bloom.width = bw; bloom.height = bh;
+        }
+      }
     };
     resize();
     const ro = new ResizeObserver(resize);
@@ -156,6 +216,8 @@ export default function AudioVisualizer() {
 
     let lastT = 0;
     const render = (t) => {
+      frameRef.current++;
+      const phase = frameRef.current & 1;
       const analyser = analyserRef.current;
       if (analyser) {
         analyser.getByteFrequencyData(freqDataRef.current);
@@ -178,6 +240,12 @@ export default function AudioVisualizer() {
 
       // Clear with bg + optional vignette
       fillBackground(ctx, canvas, bg, glow);
+
+      const doFractal = (mode === "fractal");
+      if (doFractal) {
+        if (!render.counter) render.counter = 0;
+        render.counter++;
+      }
 
       let zoom = 1;
       if (mode === "fractal" && fractalStyle === "preset") {
@@ -202,12 +270,49 @@ export default function AudioVisualizer() {
       } else if (mode === "fluid") {
         drawFluid(ctx, canvas, t, { bass, mids, highs, fg, accent, glow, sensitivity });
       } else if (mode === "fractal") {
-        drawFractal(ctx, canvas, offscreenRef.current, t, {
-          level, fg, accent, glow, sensitivity,
-          style: fractalStyle,
-          preset: fractalPreset,
-          zoom,
-        });
+        const off = offscreenRef.current;
+        if (off) {
+          const targetW = 
+            Math.max(120, 
+              Math.floor(canvas.clientWidth * renderScale * fractalQualityRef.current * 0.5));
+          const targetH = 
+            Math.max(90,
+              Math.floor(canvas.clientHeight * renderScale * fractalQualityRef.current * 0.5));
+
+          if (targetW !== fractalPerfRef.current.lastResizeW || 
+              targetH !== fractalPerfRef.current.lastResizeH) {
+            off.width = targetW;
+            off.height = targetH;
+            fractalPerfRef.current.lastResizeW = targetW;
+            fractalPerfRef.current.lastResizeH = targetH;
+          }
+        }
+        const t0 = performance.now();
+
+        if (render.counter % 2 === 0) {
+          drawFractal(ctx, canvas, offscreenRef.current, t, {
+            level, fg, accent, glow, sensitivity,
+            style: fractalStyle,
+            preset: fractalPreset,
+            zoom,
+            iterMaxOverride: fractalIterRef.current,
+            phase,
+            bloomRef,
+          });
+        } else {
+          ctx.drawImage(offscreenRef.current, 0, 0, canvas.clientWidth, canvas.clientHeight);
+        }
+
+        // Dynamic rendering
+        const dt = performance.now() - t0;
+        const targetMs = 12;
+        if (dt > targetMs + 2) {
+          fractalQualityRef.current = Math.max(0.4, fractalQualityRef.current - 0.05);
+          fractalIterRef.current    = Math.max(48, Math.floor(fractalIterRef.current * 0.92));
+        } else if (dt < targetMs - 2) {
+          fractalQualityRef.current = Math.min(1.0, fractalQualityRef.current + 0.02);
+          fractalIterRef.current    = Math.min(220, Math.floor(fractalIterRef.current * 1.02));
+        }
       }
 
       lastT = t;
@@ -239,35 +344,116 @@ export default function AudioVisualizer() {
   };
 
   return (
-    <div className="h-screen w-full grid grid-rows-[auto_1fr] bg-neutral-950 text-neutral-100">
+    <div 
+      className="
+      h-screen 
+      w-full 
+      grid 
+      grid-rows-[auto_1fr] 
+      bg-neutral-950 
+      text-neutral-100">
       {/* Top Bar */}
-      <header className="flex items-center gap-3 px-4 py-3 border-b border-white/10 backdrop-blur sticky top-0 z-10">
-        <h1 className="text-lg sm:text-xl font-bold tracking-wide">
-          Audio Visualizer <span className="text-neutral-400">— EQ · Fluid · Fractal</span>
+      <header 
+        className="
+        flex 
+        items-center 
+        gap-3 
+        px-4 
+        py-3 
+        border-b 
+        border-white/10 
+        backdrop-blur 
+        sticky 
+        top-0 
+        z-10">
+        <h1
+          className="
+          text-lg
+          sm:text-xl
+          font-bold
+          tracking-wide">
+          Audio Visualizer
+          <span
+            className="
+            text-neutral-400">
+            — EQ · Fluid · Fractal
+          </span>
+
         </h1>
-        <div className="ml-auto flex items-center gap-2">
-          <label className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer text-sm">
+
+        <div
+          className="
+          ml-auto
+          flex
+          items-center
+          gap-2">
+          <label
+            className="
+            px-3
+            py-1.5
+            rounded-xl
+            bg-white/5
+            hover:bg-white/10
+            cursor-pointer
+            text-sm">
             <input
               type="file"
               accept="audio/*"
               className="hidden"
-              onChange={(e) => onFile(e.target.files?.[0])}
-            />
+              onChange={(e) => onFile(e.target.files?.[0])} />
+
             Load Audio
+
           </label>
-          <button onClick={togglePlay} className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-sm">
+
+          <button 
+            onClick={togglePlay} 
+            className="
+            px-3
+            py-1.5
+            rounded-xl
+            bg-white/5 
+            hover:bg-white/10
+            text-sm">
+
             {isPlaying ? "Pause" : "Play"}
+
           </button>
+
         </div>
+
       </header>
 
       {/* Main Area */}
-      <main className="grid grid-cols-1 lg:grid-cols-[320px_1fr]">
+      <main 
+        className="
+        grid 
+        grid-cols-1 
+        lg:grid-cols-[320px_1fr]">
         {/* Controls */}
-        <aside className="p-4 border-r border-white/10 space-y-4 bg-black/30">
+        <aside 
+          className="
+          p-4 
+          border-r
+          border-white/10
+          space-y-4
+          bg-black/30">
           <section>
-            <h2 className="text-sm uppercase tracking-widest text-neutral-400 mb-2">Mode</h2>
-            <div className="grid grid-cols-3 gap-2">
+            <h2 
+              className="
+              text-sm 
+              uppercase
+              tracking-widest
+              text-neutral-400
+              mb-2">
+              Mode
+            </h2>
+
+            <div
+              className="
+              grid
+              grid-cols-3
+              gap-2">
               {[
                 { id: "eq", label: "EQ Bars" },
                 { id: "fluid", label: "Fluid" },
@@ -277,21 +463,35 @@ export default function AudioVisualizer() {
                   key={m.id}
                   onClick={() => setMode(m.id)}
                   className={
-                    "px-3 py-2 rounded-xl text-sm border " +
+                    "px-3py-2 rounded-xl text-sm border " +
                     (mode === m.id
                       ? "border-white/40 bg-white/10"
-                      : "border-white/10 hover:bg-white/5")
-                  }
-                >
+                      : "border-white/10 hover:bg-white/5")}>
+
                   {m.label}
                 </button>
+
               ))}
             </div>
+
           </section>
 
           <section>
-            <h2 className="text-sm uppercase tracking-widest text-neutral-400 mb-2">Presets</h2>
-            <div className="flex flex-wrap gap-2">
+            <h2 
+              className="
+              text-sm 
+              uppercase 
+              tracking-widest
+              text-neutral-400
+              mb-2">
+              Presets
+            </h2>
+
+            <div 
+              className="
+              flex
+              flex-wrap
+              gap-2">
               {Object.keys(PRESETS).map((name) => (
                 <button
                   key={name}
@@ -302,25 +502,33 @@ export default function AudioVisualizer() {
                       ? "border-white/40 bg-white/10"
                       : "border-white/10 hover:bg-white/5")
                   }
-                  title={`${name} preset`}
-                >
+                  title={`${name} preset`}>
+
                   {name}
                 </button>
+
               ))}
             </div>
+
           </section>
 
           {/* Fractal Options */}
           <section>
-            <h2 className="
-              text-sm uppercase 
+            <h2 
+              className="
+              text-sm 
+              uppercase 
               tracking-widest 
-              text-neutral-400 mb-2
-            ">
+              text-neutral-400 
+              mb-2">
               Fractal Options
             </h2>
 
-            <div className="flex gap-2 mb-2">
+            <div 
+              className="
+              flex 
+              gap-2
+              mb-2">
               {[
                 { id: 'dynamic', label: 'Dynamic' },
                 { id: 'preset',  label: 'Preset'  },
@@ -332,30 +540,63 @@ export default function AudioVisualizer() {
                     "px-3 py-1.5 rounded-xl text-sm border " +
                     (fractalStyle === opt.id
                       ? "border-white/40 bg-white/10"
-                      : "border-white/10 hover:bg-white/5")
-                  }
-                >
+                      : "border-white/10 hover:bg-white/5")}>
+
                   {opt.label}
                 </button>
+
               ))}
             </div>
+
             {fractalStyle === 'preset' && (
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-neutral-400">Preset</label>
+              <div 
+                className="
+                flex
+                items-center
+                gap-2">
+                <label 
+                  className="
+                  text-xs 
+                  text-neutral-400">
+                  Preset
+                </label>
                 <select
                   value={fractalPreset}
                   onChange={(e) => setFractalPreset(e.target.value)}
-                  className="bg-black/30 border border-white/10 rounded-lg px-2 py-1 text-sm"
-                >
+                  className="
+                  bg-black/30
+                  border
+                  border-white/10
+                  rounded-lg
+                  px-2
+                  py-1
+                  text-sm">
                   {Object.keys(FRACTAL_PRESETS).map(k => (
-                    <option key={k} value={k}>{k}</option>
+                    <option 
+                      key={k} 
+                      value={k}>
+
+                      {k}
+                    </option>
+
                   ))}
                 </select>
+
               </div>
+
             )}
             {fractalStyle === 'preset' && (
-              <div className="mt-2">
-                <label className="block text-xs text-neutral-400 mb-1">Preset Zoom Speed</label>
+              <div 
+                className="
+                mt-2">
+                <label 
+                  className="
+                  block
+                  text-xs
+                  text-neutral-400
+                  mb-1">
+                  Preset Zoom Speed
+                </label>
                 <input
                   type="range"
                   min={0.02}
@@ -363,27 +604,82 @@ export default function AudioVisualizer() {
                   step={0.01}
                   value={fractalZoomSpeed}
                   onChange={(e) => setFractalZoomSpeed(parseFloat(e.target.value))}
-                  className="w-full"
-                />
+                  className="w-full"/>
               </div>
             )}
           </section>
 
-          <section className="grid grid-cols-2 gap-3">
+          <section 
+            className="
+            grid
+            grid-cols-2
+            gap-3">
             <div>
-              <label className="block text-xs text-neutral-400 mb-1">Background</label>
-              <input type="color" value={bg} onChange={onPick(setBg)} className="w-full h-10 rounded" />
+              <label 
+                className="
+                block
+                text-xs
+                text-neutral-400
+                mb-1">
+                Background
+              </label>
+              <input 
+                type="color" 
+                value={bg} 
+                onChange={onPick(setBg)} 
+                className="
+                w-full 
+                h-10 
+                rounded" />
             </div>
+
             <div>
-              <label className="block text-xs text-neutral-400 mb-1">Primary</label>
-              <input type="color" value={fg} onChange={onPick(setFg)} className="w-full h-10 rounded" />
+              <label
+                className="
+                block
+                text-xs
+                text-neutral-400
+                mb-1">
+                Primary
+              </label>
+              <input
+                type="color" 
+                value={fg}
+                onChange={onPick(setFg)}
+                className="
+                w-full
+                h-10
+                rounded" />
             </div>
+
             <div>
-              <label className="block text-xs text-neutral-400 mb-1">Accent</label>
-              <input type="color" value={accent} onChange={onPick(setAccent)} className="w-full h-10 rounded" />
+              <label 
+                className="
+                block
+                text-xs
+                text-neutral-400
+                mb-1">
+                Accent
+              </label>
+              <input
+                type="color" 
+                value={accent}
+                onChange={onPick(setAccent)}
+                className="
+                w-full
+                h-10
+                rounded" />
             </div>
+
             <div>
-              <label className="block text-xs text-neutral-400 mb-1">Glow</label>
+              <label
+                className="
+                block
+                text-xs
+                text-neutral-400
+                mb-1">
+                Glow
+              </label>
               <input
                 type="range"
                 min={0}
@@ -391,11 +687,20 @@ export default function AudioVisualizer() {
                 step={0.01}
                 value={glow}
                 onChange={(e) => setGlow(parseFloat(e.target.value))}
-                className="w-full"
-              />
+                className="w-full" />
             </div>
-            <div className="col-span-2">
-              <label className="block text-xs text-neutral-400 mb-1">Sensitivity</label>
+
+            <div 
+              className="
+              col-span-2">
+              <label 
+                className="
+                block 
+                text-xs
+                text-neutral-400
+                mb-1">
+                Sensitivity
+              </label>
               <input
                 type="range"
                 min={0.4}
@@ -403,11 +708,20 @@ export default function AudioVisualizer() {
                 step={0.05}
                 value={sensitivity}
                 onChange={(e) => setSensitivity(parseFloat(e.target.value))}
-                className="w-full"
-              />
+                className="w-full" />
             </div>
-            <div className="col-span-2">
-              <label className="block text-xs text-neutral-400 mb-1">Quality</label>
+
+            <div
+              className="
+              col-span-2">
+              <label 
+                className="
+                block 
+                text-xs
+                text-neutral-400
+                mb-1">
+                Quality
+              </label>
               <input
                 type="range"
                 min={0.5}
@@ -415,12 +729,18 @@ export default function AudioVisualizer() {
                 step={0.05}
                 value={renderScale}
                 onChange={(e) => setRenderScale(parseFloat(e.target.value))}
-                className="w-full"
-              />
+                className="w-full" />
             </div>
+
           </section>
 
-          <p className="text-xs text-neutral-400">Tip: Drag & drop an MP3 anywhere on the canvas.</p>
+          <p
+            className="
+            text-xs 
+            text-neutral-400">
+            Tip: Drag & drop an MP3 anywhere on the canvas.
+          </p>
+
         </aside>
 
         {/* Canvas Stage */}
@@ -428,11 +748,23 @@ export default function AudioVisualizer() {
           className="relative"
           style={{ background: bg }}
         >
-          <CanvasGlowWrapper glow={glow} color={accent} />
-          <canvas ref={canvasRef} className="w-full h-full block" />
-          <audio ref={audioRef} crossOrigin="anonymous" hidden />
+          <CanvasGlowWrapper 
+            glow={glow} 
+            color={accent} />
+          <canvas 
+            ref={canvasRef} 
+            className="
+            w-full 
+            h-full
+            block" />
+          <audio 
+            ref={audioRef} 
+            crossOrigin="anonymous" 
+            hidden />
         </section>
+
       </main>
+
     </div>
   );
 }
@@ -623,17 +955,22 @@ function drawFluid(ctx, canvas, t, { bass, mids, highs, fg, accent, glow, sensit
 function drawFractal(ctx, canvas, off, t, {
   level, fg, accent, glow, sensitivity,
   style = 'dynamic', preset = 'Dendrite',
-  zoom = 1,
+  zoom = 1, iterMaxOverride = 96,
+  phase = 0, bloomRef
 }) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   const ow = off.width, oh = off.height;
   const octx = off.getContext("2d");
 
   // Choose parameters
-  let cRe, cIm, scale, panX, panY;
+  let cRe, cIm, scale, panX, panY, interiorDim = 0.08, driftX = 0.012, driftY = 0.012;
+
   if (style === 'preset') {
     const p = FRACTAL_PRESETS[preset] || FRACTAL_PRESETS.Dendrite;
     ({ cRe, cIm, scale, panX, panY } = p);
+    interiorDim = p.interiorDim ?? 0.08;
+    driftX = p.driftX ?? driftX;
+    driftY = p.driftY ?? driftY;
   } else {
     // Dynamic: gently orbit around a classic point
     const baseRe = -0.8, baseIm = 0.156;
@@ -641,25 +978,33 @@ function drawFractal(ctx, canvas, off, t, {
     cRe = baseRe + Math.cos(t * (0.0009 + 0.0006 * sensitivity)) * jitter;
     cIm = baseIm + Math.sin(t * (0.0011 + 0.0005 * sensitivity)) * jitter * 0.8;
     scale = 1.8; panX = -0.10; panY = 0.0;
+    interiorDim = 0.09;
+    driftX = 0.008;
+    driftY = 0.010;
   }
 
   const effectiveScale = scale * zoom;
 
+  const z = Math.max(0, Math.log2(Math.max(zoom, 1)));
+  const panXEff = panX - driftX * z;
+  const panYEff = panY + driftY * z;
+
+  const iterMax = Math.max(40, Math.floor(iterMaxOverride + level * 24));
+
   const img = octx.getImageData(0, 0, ow, oh);
   const data = img.data;
-  const iterMax = Math.floor(56 + level * 60);
 
   const [r1, g1, b1] = hexToRgb(fg);
   const [r2, g2, b2] = hexToRgb(accent);
 
   // Music brightness pulse (applied to colors)
-  const bright = Math.max(0.6, Math.min(1.4, 0.80 + level * 0.60));
+  const bright = Math.max(0.7, Math.min(1.35, 0.85 + level * 0.55));
 
-  let i = 0;
-  for (let y = 0; y < oh; y++) {
-    const ny = ((y / oh - 0.5) * 2.0) / effectiveScale + panY;
+  for (let y = phase; y < oh; y+= 2) {
+    const ny = ((y / oh - 0.5) * 2.0) / effectiveScale + panYEff;
+    let i = (y * ow) * 4;
     for (let x = 0; x < ow; x++) {
-      const nx = (((x / ow - 0.5) * (w / h) * 2.0) / effectiveScale) + panX;
+      const nx = (((x / ow - 0.5) * (w / h) * 2.0) / effectiveScale) + panXEff;
 
       let zr = nx, zi = ny;
       let iter = 0, zr2 = 0, zi2 = 0;
@@ -697,12 +1042,29 @@ function drawFractal(ctx, canvas, off, t, {
   // Composite with optional soft glow
   ctx.save();
   ctx.imageSmoothingEnabled = true;
-  if (glow > 0.05) {
-    ctx.filter = `blur(${Math.round(2 + 5 * glow)}px)`;
-    ctx.globalAlpha = 0.6;
-    ctx.drawImage(off, 0, 0, w, h);
-    ctx.filter = 'none';
-  }
+  
+  const bloom = bloomRef.current;
+  const bw = bloom.width; 
+  const bh = bloom.height;
+  const bctx = bloom.getContext("2d");
+  bctx.clearRect(0, 0, bw, bh);
+  bctx.globalCompositeOperation = "source-over";
+  bctx.globalAlpha = 1;
+  bctx.drawImage(off, 0, 0, bw, bh);
+
+  bctx.globalCompositeOperation = "lighter";
+  bctx.globalAlpha = 0.5;
+  bctx.drawImage(bloom, -1, 0, bw + 1, bh);
+  bctx.drawImage(bloom, 0, -1, bw, bh + 1);
+  bctx.globalAlpha = 0.35;
+  bctx.drawImage(bloom, -2, 0, bw + 2, bh);
+  bctx.drawImage(bloom, 0, -2, bw, bh + 2);
+
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = 0.6 * glow;
+  ctx.drawImage(bloom, 0, 0, w, h);
+
+  ctx.globalCompositeOperation = "source-over";
   ctx.globalAlpha = 0.95;
   ctx.drawImage(off, 0, 0, w, h);
   ctx.restore();
